@@ -11,7 +11,11 @@ from vmbpy import VmbSystem, PixelFormat
 # Physical pixel size at the sample plane.
 # Set this to: camera_sensor_pixel_pitch_um / objective_magnification
 # Example: 4.4 um pixel pitch / 50x objective = 0.088 um/pixel
-PIXEL_SIZE_UM = 0.088
+
+PIXEL_PITCH_UM = 30
+OBJECTIVE_MAGNIFICATION = 100
+
+PIXEL_SIZE_UM = PIXEL_PITCH_UM / OBJECTIVE_MAGNIFICATION
 
 plt.ion()
 
