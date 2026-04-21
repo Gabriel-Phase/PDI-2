@@ -4,8 +4,6 @@ import cv2
 # numpy: fast math on arrays of numbers (we use it for the brightness data)
 import numpy as np
 # matplotlib: creates the graph/plot that appears after a scan
-import matplotlib
-matplotlib.use('macosx')  # tells matplotlib to use the native Mac window system
 import matplotlib.pyplot as plt
 # curve_fit: scipy's tool that finds the best-fitting curve through a set of data points
 from scipy.optimize import curve_fit
