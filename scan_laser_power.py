@@ -52,6 +52,9 @@ def main():
     parser.add_argument('image', help='Path to input image')
     parser.add_argument('--pixel-size', type=float, default=0.0356,
                         help='Physical pixel size in um/pixel (default: 0.0356)')
+    # NEW ARGUMENT: Let the user define the total power in Watts
+    parser.add_argument('--total-power', type=float, default=None,
+                        help='Total beam power in Watts to scale Y-axis to Watts/mm^2')
     args = parser.parse_args()
 
     gray = load_grayscale(args.image)
@@ -67,9 +70,30 @@ def main():
     today = datetime.date.today()
     date_str = f"{today.month}/{today.day}/{today.year}"
 
+    y_label = 'Intensity (a.u.)' # Default label
+
     if fit['success']:
         diameter_um = 2 * fit['w'] * 1e3
         diam_str = f"1/e^2 Gaussian Diameter = {diameter_um:.4f} um"
+        
+        # NEW LOGIC: Scale the data if the user provided Total Power
+        if args.total_power is not None:
+            # Calculate theoretical peak irradiance in Watts/mm^2
+            # Formula: I_peak = (2 * Power) / (pi * w^2)
+            # fit['w'] is the radius in mm
+            peak_irradiance = (2 * args.total_power) / (np.pi * (fit['w'] ** 2))
+            
+            # Create a multiplier to turn camera pixels into Watts/mm^2
+            scale_factor = peak_irradiance / fit['A']
+            
+            # Scale the raw data and the fit parameters
+            row = row * scale_factor
+            fit['A'] = fit['A'] * scale_factor
+            fit['B'] = fit['B'] * scale_factor
+            
+            # Update the Y-axis label to reflect the new physical units
+            y_label = 'Irradiance (Watts/mm^2)'
+            
     else:
         diam_str = "Fit failed"
 
@@ -90,7 +114,8 @@ def main():
         ax.axhline(level, color='red', linestyle='--', linewidth=1)
 
     ax.set_xlabel('Position (mm)', fontsize=10)
-    ax.set_ylabel('Intensity (a.u.)', fontsize=10)
+    # Applied the dynamically chosen Y-label here
+    ax.set_ylabel(y_label, fontsize=10) 
     ax.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
     ax.grid(True, alpha=0.4)
     ax.set_xlim(x_mm[0], x_mm[-1])
@@ -108,11 +133,15 @@ def main():
     fig.text(0.05, 0.145, date_str, ha='left', va='top', fontsize=9, family='monospace')
     fig.text(0.05, 0.10,  diam_str, ha='left', va='top', fontsize=9, family='monospace')
 
-    plt.savefig('beam_profile.png', dpi=150, bbox_inches='tight')
+    # Optional: Add the total power to the readout if it was used
+    if args.total_power is not None and fit['success']:
+        power_str = f"Total Power = {args.total_power:.2e} W"
+        fig.text(0.05, 0.055, power_str, ha='left', va='top', fontsize=9, family='monospace')
+
+    plt.savefig('beam_profile_scaled.png', dpi=150, bbox_inches='tight')
     plt.show()
-
-
 
 if __name__ == '__main__':
     main()
-# python image_scan.py photos\image.png
+    
+# python scan_laser_power.py photos\image.png --total-power 22077
