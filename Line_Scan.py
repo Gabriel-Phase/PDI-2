@@ -1,6 +1,7 @@
 import datetime
 import queue
 import sys
+import time
 import cv2
 import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
@@ -221,6 +222,7 @@ class MainWindow(QMainWindow):
 
         self._latest_frame  = None
         self._camera_thread = None
+        self._last_frame_time = None
 
         self._build_ui()
 
@@ -242,7 +244,7 @@ class MainWindow(QMainWindow):
 
     def _make_left_panel(self):
         panel = QWidget()
-        panel.setFixedWidth(260)
+        panel.setFixedWidth(380)
         layout = QVBoxLayout(panel)
         layout.setAlignment(Qt.AlignTop)
         layout.setSpacing(8)
@@ -456,6 +458,11 @@ class MainWindow(QMainWindow):
         self.camera_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.camera_label)
 
+        self.fps_label = QLabel("FPS: --")
+        self.fps_label.setAlignment(Qt.AlignRight)
+        self.fps_label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(self.fps_label)
+
         return panel
 
     def _make_divider(self):
@@ -504,8 +511,10 @@ class MainWindow(QMainWindow):
                 self._camera_thread = None
             self._set_controls_enabled(False)
             self._latest_frame = None
+            self._last_frame_time = None
             self.camera_label.clear()
             self.camera_label.setStyleSheet("background-color: black;")
+            self.fps_label.setText("FPS: --")
 
     def _on_connection_failed(self, message: str):
         self.connect_btn.setChecked(False)
@@ -527,6 +536,12 @@ class MainWindow(QMainWindow):
             self.status_label.hide()
             self.status_label.setText("")
         self._latest_frame = img
+
+        now = time.monotonic()
+        if self._last_frame_time is not None:
+            fps = 1.0 / (now - self._last_frame_time)
+            self.fps_label.setText(f"FPS: {fps:.1f}")
+        self._last_frame_time = now
 
         max_val = self._camera_thread.max_val if self._camera_thread else 255.0
 
@@ -563,8 +578,10 @@ class MainWindow(QMainWindow):
         cy     = h // 2
 
         row  = img[cy].astype(float)
-        x_mm = (np.arange(w) - w / 2) * PIXEL_SIZE_UM * 1e-3
-
+        
+        # x_mm = (np.arange(w) - w / 2) * PIXEL_SIZE_UM * 1e-3
+        x_mm = (np.arange(w) - w/2) * PIXEL_PITCH_UM 
+        
         fit = fit_gaussian(x_mm, row)
         show_plot(x_mm, row, fit)
 
@@ -585,7 +602,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.resize(800, 500)
+    window.resize(1000, 500)
     window.show()
     sys.exit(app.exec())
 
