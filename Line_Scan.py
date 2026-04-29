@@ -1,11 +1,20 @@
 import datetime
 import sys
-import cv2                          # OpenCV: used to show the live camera window
-import matplotlib.lines as mlines  # lets us draw straight lines on the plot
-import matplotlib.pyplot as plt     # used to draw the beam profile graph
-import numpy as np                  # math library for arrays and number crunching
-from scipy.optimize import curve_fit  # finds the best-fit curve through data points
-from vmbpy import VmbSystem, PixelFormat  # Allied Vision camera driver
+import cv2
+import matplotlib.lines as mlines
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.optimize import curve_fit
+from vmbpy import VmbSystem, PixelFormat
+
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget,
+    QHBoxLayout, QVBoxLayout, QPushButton,
+    QLabel, QSlider, QSizePolicy, QFrame,
+    QRadioButton, QButtonGroup,
+)
 
 # --- How big is one pixel in real life? ---
 # The camera sensor has tiny squares (pixels). Each square is 3 micrometers wide.
@@ -20,35 +29,12 @@ PIXEL_SIZE_UM = PIXEL_PITCH_UM / OBJECTIVE_MAGNIFICATION  # real size of one pix
 # Turn on matplotlib's "interactive" mode so plots appear without freezing the program
 plt.ion()
 
-# This flag becomes True when the user clicks the SCAN button
-scan_triggered = False
-
 # Keeps track of the currently open plot window (None means no window is open)
 _current_fig = None
 
-# --- Button and mouse ---
-
-def draw_button(frame):
-    # Draws a green "SCAN" button in the top-right corner of the camera window.
-    # Returns the button's corner coordinates so we know where to detect clicks.
-    h, w = frame.shape[:2]
-    x1, y1, x2, y2 = w - 120, 10, w - 10, 50  # pixel coordinates of the button box
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (40, 40, 40), -1)   # dark grey fill
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)     # green border
-    cv2.putText(frame, "SCAN", (x1 + 18, y1 + 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)    # green label
-    return (x1, y1, x2, y2)
-
-def mouse_callback(event, x, y, flags, param):
-    # OpenCV calls this function automatically every time the user clicks in the window.
-    # We check if the click landed inside the SCAN button; if so, set the trigger flag.
-    global scan_triggered
-    if event == cv2.EVENT_LBUTTONDOWN:          # left mouse button was pressed
-        bx1, by1, bx2, by2 = param['btn']       # unpack button corners from param dict
-        if bx1 <= x <= bx2 and by1 <= y <= by2: # was the click inside the button?
-            scan_triggered = True
-
-# --- Gaussian fitting ---
+# =============================================================================
+# Gaussian fitting
+# =============================================================================
 
 def _gaussian(x, A, x0, w, B):
     # The mathematical shape of a laser beam is called a Gaussian (bell curve).
@@ -84,7 +70,9 @@ def fit_gaussian(x_vals, intensity_vals):
     except Exception:
         return {'success': False}  # fitting failed entirely (e.g. data too noisy)
 
-# --- Plot (POP beam profile format) ---
+# =============================================================================
+# Beam profile plot  (opens as a separate matplotlib window)
+# =============================================================================
 
 def show_plot(x_mm, row, fit):
     global _current_fig
@@ -144,12 +132,10 @@ def show_plot(x_mm, row, fit):
     ax.set_xlim(x_mm[0], x_mm[-1])
 
     # --- Footer section (mimics a POP beam profile report) ---
-    # Horizontal divider line below the plot
     fig.add_artist(mlines.Line2D([0.05, 0.95], [0.265, 0.265],
                                   transform=fig.transFigure, color='black', linewidth=0.8))
     fig.text(0.5, 0.215, 'POP beam profile', ha='center', va='top',
              fontsize=10, family='monospace')
-    # Second divider line
     fig.add_artist(mlines.Line2D([0.05, 0.95], [0.175, 0.175],
                                   transform=fig.transFigure, color='black', linewidth=0.8))
     fig.text(0.05, 0.145, date_str, ha='left', va='top', fontsize=9, family='monospace')
@@ -166,7 +152,9 @@ def show_plot(x_mm, row, fit):
     except Exception:
         pass
 
-# --- Pixel format selection ---
+# =============================================================================
+# Camera helpers
+# =============================================================================
 
 def select_pixel_format(camera):
     # Cameras can output images in different bit depths (more bits = more shades of grey).
@@ -178,65 +166,341 @@ def select_pixel_format(camera):
             return depth  # return how many bits per pixel we ended up with
     sys.exit("Error: no supported monochrome pixel format found on camera")
 
-# --- Main ---
+# =============================================================================
+# Camera thread  — runs the capture loop in the background
+# =============================================================================
+
+class CameraThread(QThread):
+    # Qt signal: fired once per frame with the raw numpy pixel array.
+    # The GUI listens for this and updates the display each time it fires.
+    frame_ready = Signal(object)
+    connection_failed = Signal(str)   # emitted with an error message when startup fails
+
+    def __init__(self):
+        super().__init__()
+        self._running = False
+        self.bit_depth = 8
+        self.max_val   = 255.0
+
+    def run(self):
+        # This method runs in a separate thread so the GUI never freezes waiting for a frame.
+        self._running = True
+        try:
+            with VmbSystem.get_instance() as vmb:
+                cameras = vmb.get_all_cameras()
+                if not cameras:
+                    self.connection_failed.emit("Connection failed: no cameras found.")
+                    return
+                with cameras[0] as camera:
+                    self.bit_depth = select_pixel_format(camera)
+                    self.max_val   = float(2 ** self.bit_depth - 1)
+                    while self._running:
+                        try:
+                            frame = camera.get_frame(timeout_ms=2000)
+                            img   = frame.as_numpy_ndarray()
+                            self.frame_ready.emit(img)  # send frame to the GUI
+                        except Exception:
+                            break
+        except Exception as exc:
+            self.connection_failed.emit(f"Connection failed: {exc}")
+
+    def stop(self):
+        # Signal the loop to exit, then wait for the thread to finish cleanly.
+        self._running = False
+        self.wait()
+
+# =============================================================================
+# Main window
+# =============================================================================
+
+class MainWindow(QMainWindow):
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Line Scanner")
+
+        self._latest_frame  = None   # the most recent raw frame from the camera
+        self._camera_thread = None   # CameraThread instance, or None when disconnected
+
+        self._build_ui()
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+
+        # Root layout splits the window into left controls and right camera feed
+        root = QHBoxLayout(central)
+        root.setSpacing(12)
+        root.setContentsMargins(12, 12, 12, 12)
+
+        root.addWidget(self._make_left_panel())
+        root.addWidget(self._make_divider())
+        root.addWidget(self._make_right_panel(), stretch=1)
+
+    # ------------------------------------------------------------------
+    # Panel builders
+    # ------------------------------------------------------------------
+
+    def _make_left_panel(self):
+        panel = QWidget()
+        panel.setFixedWidth(220)
+        layout = QVBoxLayout(panel)
+        layout.setAlignment(Qt.AlignTop)
+        layout.setSpacing(8)
+
+        # --- Line scan button ---
+        # Disabled until the camera is connected; enabled in _on_camera_connected()
+        self.scan_btn = QPushButton("LINE SCAN")
+        self.scan_btn.setEnabled(False)
+        self.scan_btn.setFixedHeight(40)
+        self.scan_btn.clicked.connect(self._do_scan)
+        layout.addWidget(self.scan_btn)
+
+        layout.addSpacing(16)
+
+        # --- Camera setting sliders ---
+        self._all_mode_buttons = []   # all radio buttons; toggled on connect/disconnect
+        for display_name, attr_prefix in [
+            ("Exposure",  "exposure"),
+            ("Gain",      "gain"),
+            ("Intensity", "intensity"),
+        ]:
+            self._make_slider_group(display_name, attr_prefix, layout)
+
+        layout.addStretch()
+        return panel
+
+    def _make_slider_group(self, display_name, attr_prefix, layout):
+        # Header: setting name on the left, current value on the right
+        header = QHBoxLayout()
+        header.addWidget(QLabel(display_name))
+        header.addStretch()
+        val_lbl = QLabel("50")
+        val_lbl.setAlignment(Qt.AlignRight)
+        header.addWidget(val_lbl)
+        layout.addLayout(header)
+
+        # Mode row: Off / Once / Continuous radio buttons
+        mode_row = QHBoxLayout()
+        off_btn  = QRadioButton("Off")
+        once_btn = QRadioButton("Once")
+        cont_btn = QRadioButton("Continuous")
+        off_btn.setChecked(True)
+        for btn in (off_btn, once_btn, cont_btn):
+            btn.setEnabled(False)
+            mode_row.addWidget(btn)
+            self._all_mode_buttons.append(btn)
+        layout.addLayout(mode_row)
+
+        group = QButtonGroup(self)
+        group.addButton(off_btn,  0)
+        group.addButton(once_btn, 1)
+        group.addButton(cont_btn, 2)
+
+        # Slider
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(50)
+        slider.setEnabled(False)
+        layout.addWidget(slider)
+        layout.addSpacing(8)
+
+        # Store refs under the expected attribute names
+        setattr(self, f"{attr_prefix}_slider",      slider)
+        setattr(self, f"{attr_prefix}_mode_group",  group)
+        setattr(self, f"{attr_prefix}_value_label", val_lbl)
+        setattr(self, f"{attr_prefix}_off_btn",     off_btn)
+
+        # Value display
+        slider.valueChanged.connect(lambda v: val_lbl.setText(str(v)))
+
+        # Mode → slider enable/disable
+        def on_mode(btn_id):
+            slider.setEnabled(btn_id != 0)
+
+        group.idClicked.connect(on_mode)
+
+        # Once: revert to Off after the user releases the slider
+        def on_released():
+            if group.checkedId() == 1:
+                off_btn.setChecked(True)
+                slider.setEnabled(False)
+
+        slider.sliderReleased.connect(on_released)
+
+    def _make_right_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+
+        # --- Connect / Disconnect button ---
+        # Acts as a toggle: click once to start the camera, click again to stop it.
+        self.connect_btn = QPushButton("CONNECT")
+        self.connect_btn.setFixedHeight(36)
+        self.connect_btn.setCheckable(True)   # stays "pressed" while camera is active
+        self.connect_btn.clicked.connect(self._toggle_camera)
+        layout.addWidget(self.connect_btn)
+
+        self.status_label = QLabel("")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("color: red;")
+        self.status_label.hide()
+        layout.addWidget(self.status_label)
+
+        # --- Camera feed display ---
+        # Shows the live camera image as a scaled pixmap.
+        # When the camera is off, this area stays black.
+        self.camera_label = QLabel()
+        self.camera_label.setAlignment(Qt.AlignCenter)
+        self.camera_label.setStyleSheet("background-color: black;")
+        self.camera_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.camera_label)
+
+        return panel
+
+    def _make_divider(self):
+        # Thin vertical line between the left and right panels
+        line = QFrame()
+        line.setFrameShape(QFrame.VLine)
+        line.setFrameShadow(QFrame.Sunken)
+        return line
+
+    # ------------------------------------------------------------------
+    # Camera control
+    # ------------------------------------------------------------------
+
+    def _toggle_camera(self, checked):
+        if checked:
+            # Start the camera
+            try:
+                self.connect_btn.setText("DISCONNECT")
+                self.status_label.hide()
+                self.status_label.setText("")
+                self._camera_thread = CameraThread()
+                self._camera_thread.frame_ready.connect(self._on_frame)
+                self._camera_thread.connection_failed.connect(self._on_connection_failed)
+                self._camera_thread.start()
+                # Enable controls that need a live camera
+                self.scan_btn.setEnabled(True)
+                for btn in self._all_mode_buttons:
+                    btn.setEnabled(True)
+            except Exception as e:
+                self.connect_btn.setChecked(False)
+                self.connect_btn.setText("CONNECT")
+                print(f"Error starting camera: {e}")
+        else:
+            # Stop the camera
+            self.connect_btn.setText("CONNECT")
+            if self._camera_thread:
+                self._camera_thread.stop()
+                self._camera_thread = None
+            # Disable controls and clear the display
+            self.scan_btn.setEnabled(False)
+            for btn in self._all_mode_buttons:
+                btn.setEnabled(False)
+            for prefix in ("exposure", "gain", "intensity"):
+                getattr(self, f"{prefix}_off_btn").setChecked(True)
+                getattr(self, f"{prefix}_slider").setEnabled(False)
+            self._latest_frame = None
+            self.camera_label.clear()
+            self.camera_label.setStyleSheet("background-color: black;")
+
+    def _on_connection_failed(self, message: str):
+        self.connect_btn.setChecked(False)
+        self.connect_btn.setText("CONNECT")
+        self.scan_btn.setEnabled(False)
+        for btn in self._all_mode_buttons:
+            btn.setEnabled(False)
+        for prefix in ("exposure", "gain", "intensity"):
+            getattr(self, f"{prefix}_off_btn").setChecked(True)
+            getattr(self, f"{prefix}_slider").setEnabled(False)
+        self.status_label.setText(message)
+        self.status_label.show()
+        if self._camera_thread:
+            self._camera_thread.quit()
+            self._camera_thread.wait()
+            self._camera_thread = None
+
+    # ------------------------------------------------------------------
+    # Frame display
+    # ------------------------------------------------------------------
+
+    def _on_frame(self, img):
+        # Called automatically each time the camera thread emits a new frame.
+        if self.status_label.isVisible():
+            self.status_label.hide()
+            self.status_label.setText("")
+        self._latest_frame = img
+
+        max_val = self._camera_thread.max_val if self._camera_thread else 255.0
+
+        # Scale raw pixel values down to 8-bit (0-255) just for display;
+        # the full-depth data is kept in self._latest_frame for the scan.
+        display = (img.astype(float) / max_val * 255).astype(np.uint8)
+
+        h, w = display.shape[:2]
+        cx, cy = w // 2, h // 2
+
+        # Convert grayscale to colour so we can draw a green crosshair
+        display_bgr = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+        cv2.line(display_bgr, (0, cy), (w, cy), (0, 255, 0), 2)   # horizontal scan line
+        cv2.line(display_bgr, (cx, 0), (cx, h), (0, 255, 0), 2)   # vertical center line
+
+        # Convert the OpenCV (BGR) array to a Qt image, then to a pixmap for the label
+        rgb  = cv2.cvtColor(display_bgr, cv2.COLOR_BGR2RGB)
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
+
+        # Scale the pixmap to fit the label while keeping the camera's aspect ratio
+        scaled = pixmap.scaled(
+            self.camera_label.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.camera_label.setPixmap(scaled)
+
+    # ------------------------------------------------------------------
+    # Scan
+    # ------------------------------------------------------------------
+
+    def _do_scan(self):
+        if self._latest_frame is None:
+            return
+
+        img    = self._latest_frame
+        h, w   = img.shape[:2]
+        cy     = h // 2
+
+        # Extract the horizontal row of pixels running through the centre of the frame
+        row  = img[cy].astype(float)
+
+        # Convert pixel positions to millimetres, centred at zero
+        x_mm = (np.arange(w) - w / 2) * PIXEL_SIZE_UM * 1e-3
+
+        fit = fit_gaussian(x_mm, row)
+        show_plot(x_mm, row, fit)
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event):
+        # Make sure the camera thread shuts down when the window is closed
+        if self._camera_thread:
+            self._camera_thread.stop()
+        plt.close('all')
+        event.accept()
+
+# =============================================================================
+# Entry point
+# =============================================================================
 
 def main():
-    # Open a connection to the Allied Vision camera system
-    with VmbSystem.get_instance() as vmb:
-        cameras = vmb.get_all_cameras()
-        if not cameras:
-            sys.exit("Error: no Allied Vision cameras found")
-
-        with cameras[0] as camera:  # use the first camera found
-            bit_depth = select_pixel_format(camera)
-            max_val   = float(2 ** bit_depth - 1)  # maximum possible pixel value (e.g. 4095 for 12-bit)
-
-            # Create the live camera window and connect the mouse click handler
-            cv2.namedWindow("GoldenEye")
-            btn_coords = (0, 0, 1, 1)  # placeholder; real coords set after first frame
-            cv2.setMouseCallback("GoldenEye", mouse_callback, {'btn': btn_coords})
-
-            # --- Main camera loop: runs once per frame until the user presses 'q' ---
-            while True:
-                global scan_triggered
-                frame = camera.get_frame(timeout_ms=2000)   # grab one frame from the camera
-                img   = frame.as_numpy_ndarray()             # convert it to a 2-D array of pixel values
-                h, w  = img.shape[:2]
-                cx, cy = w // 2, h // 2                      # center pixel of the frame
-
-                # The raw image has more than 8 bits, but a screen can only show 0-255.
-                # Scale the values down to 8-bit just for display — the raw data is kept for scanning.
-                display = (img.astype(float) / max_val * 255).astype(np.uint8)
-                display_bgr = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)  # grey -> colour so we can draw green lines
-
-                if scan_triggered:
-                    scan_triggered = False
-
-                    # Extract the horizontal row of pixels that runs through the centre of the frame.
-                    # This is the line we'll fit the Gaussian to.
-                    row   = img[cy].astype(float)
-
-                    # Convert pixel positions to millimetres, centred at zero
-                    x_mm  = (np.arange(w) - w / 2) * PIXEL_SIZE_UM * 1e-3
-
-                    fit   = fit_gaussian(x_mm, row)   # attempt to fit a Gaussian to that row
-                    show_plot(x_mm, row, fit)          # display the beam profile plot
-
-                # Draw a green crosshair over the live feed to mark the scan line
-                cv2.line(display_bgr, (0, cy), (w, cy), (0, 255, 0), 2)   # horizontal line
-                cv2.line(display_bgr, (cx, 0), (cx, h), (0, 255, 0), 2)   # vertical line
-
-                # Redraw the SCAN button and update the mouse callback with its current position
-                btn_coords = draw_button(display_bgr)
-                cv2.setMouseCallback("GoldenEye", mouse_callback, {'btn': btn_coords})
-
-                cv2.imshow("GoldenEye", display_bgr)  # push the frame to the screen
-
-                if cv2.waitKey(1) & 0xFF == ord('q'):  # press 'q' to quit
-                    break
-
-    cv2.destroyAllWindows()  # close the camera window
-    plt.close('all')         # close any open plot windows
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.resize(800, 500)
+    window.show()
+    sys.exit(app.exec())
 
 if __name__ == '__main__':
     main()
