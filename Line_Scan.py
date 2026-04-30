@@ -106,7 +106,7 @@ def show_plot(x_mm, row, fit):
         level = A / np.e ** 2 + B
         ax.axhline(level, color='red', linestyle='--', linewidth=1)
 
-    ax.set_xlabel('Position (mm)', fontsize=10)
+    ax.set_xlabel('Position (µm)', fontsize=10)
     ax.set_ylabel('Intensity (a.u.)', fontsize=10)
     ax.ticklabel_format(style='sci', axis='both', scilimits=(0, 0))
     ax.grid(True, alpha=0.4)
