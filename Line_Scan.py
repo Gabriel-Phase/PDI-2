@@ -18,15 +18,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 
-# --- How big is one pixel in real life? ---
-# The camera sensor has tiny squares (pixels). Each square is 3 micrometers wide.
-# But we're looking through a 275x microscope objective, so each pixel actually
-# represents a much smaller piece of the sample.
-# Real size per pixel = sensor pixel size / magnification
-PIXEL_PITCH_UM = 3               # physical size of one camera pixel, in micrometers
-OBJECTIVE_MAGNIFICATION = 275    # how much the objective lens magnifies the sample
+PIXEL_PITCH_UM  = 5.0   # Alvium G1-030 VSWIR sensor pixel pitch (µm)
+OBJECTIVE_MAG   = 100   # Mitutoyo 100x M Plan APO NIR
+ZOOM_MAG        = 5.25  # Optem Fusion 7:1 at maximum zoom (range: 0.75x–5.25x)
+CAMERA_TUBE_MAG = 1.0   # Optem Fusion camera tube 35-08-06-000
 
-PIXEL_SIZE_UM = PIXEL_PITCH_UM / OBJECTIVE_MAGNIFICATION  # real size of one pixel at the sample
+PIXEL_SIZE_UM = PIXEL_PITCH_UM / (OBJECTIVE_MAG * ZOOM_MAG * CAMERA_TUBE_MAG)
 
 # Turn on matplotlib's "interactive" mode so plots appear without freezing the program
 plt.ion()
@@ -573,15 +570,48 @@ class MainWindow(QMainWindow):
         if self._latest_frame is None:
             return
 
-        img    = self._latest_frame
-        h, w   = img.shape[:2]
-        cy     = h // 2
+        img  = self._latest_frame
+        h, w = img.shape[:2]
+        cy   = h // 2
 
-        row  = img[cy].astype(float)
+        # ---------------------------------------------------------
+        # FIX 1: Row Averaging for Noise Reduction
+        # ---------------------------------------------------------
+        # Safely grab 11 rows around the center (handling edge cases if image is tiny)
+        top_row = max(0, cy - 5)
+        bot_row = min(h, cy + 6)
         
-        # x_mm = (np.arange(w) - w / 2) * PIXEL_SIZE_UM * 1e-3
-        x_mm = (np.arange(w) - w/2) * PIXEL_PITCH_UM 
+        # Average the rows together to smooth out digital noise
+        row = np.mean(img[top_row:bot_row], axis=0).astype(float)
         
+        # ---------------------------------------------------------
+        # FIX 2: Beam Clipping Detection
+        # ---------------------------------------------------------
+        peak_intensity = np.max(row)
+        baseline_estimate = np.min(row)
+        amplitude = peak_intensity - baseline_estimate
+
+        # Check how "bright" the edges of the sensor are relative to the peak
+        left_edge = row[0] - baseline_estimate
+        right_edge = row[-1] - baseline_estimate
+        clip_threshold = 0.15 * amplitude  # 15% threshold
+
+        # Warn the UI if the beam hasn't tapered off by the edges of the sensor
+        if left_edge > clip_threshold or right_edge > clip_threshold:
+            self.status_label.setText("WARNING: Beam is clipped! Please zoom out or adjust alignment.")
+            self.status_label.show()
+        else:
+            # Clear the warning if the beam is contained safely within the frame
+            self.status_label.hide()
+            self.status_label.setText("")
+
+        # ---------------------------------------------------------
+        # Execute Math & Plotting
+        # ---------------------------------------------------------
+        # Calculate physical x-axis in millimeters based on your correct optical math
+        x_mm = (np.arange(w) - w / 2) * PIXEL_SIZE_UM * 1e-3
+        
+        # Fit the Gaussian and display
         fit = fit_gaussian(x_mm, row)
         show_plot(x_mm, row, fit)
 
