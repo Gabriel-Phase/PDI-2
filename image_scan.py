@@ -47,11 +47,19 @@ def load_grayscale(path):
     return 0.299 * r + 0.587 * g + 0.114 * b
 
 
+PIXEL_PITCH_UM  = 5.0   # Alvium G1-030 VSWIR sensor pixel pitch (µm)
+OBJECTIVE_MAG   = 100   # Mitutoyo 100x M Plan APO NIR
+ZOOM_MAG        = 5.25  # Optem Fusion 7:1 at maximum zoom (range: 0.75x–5.25x)
+CAMERA_TUBE_MAG = 1.0   # Optem Fusion camera tube 35-08-06-000
+
+PIXEL_SIZE_UM = PIXEL_PITCH_UM / (OBJECTIVE_MAG * ZOOM_MAG * CAMERA_TUBE_MAG)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Beam profile line scan from image')
     parser.add_argument('image', help='Path to input image')
-    parser.add_argument('--pixel-size', type=float, default=0.0356,
-                        help='Physical pixel size in um/pixel (default: 0.0356)')
+    parser.add_argument('--pixel-size', type=float, default=None,
+                        help='Override pixel size in µm/pixel (default: calculated from optics)')
     args = parser.parse_args()
 
     gray = load_grayscale(args.image)
@@ -59,7 +67,7 @@ def main():
 
     row = gray[h // 2]
 
-    pixel_size_mm = args.pixel_size * 1e-3
+    pixel_size_mm = (args.pixel_size if args.pixel_size is not None else PIXEL_SIZE_UM) * 1e-3
     x_mm = (np.arange(w) - w / 2) * pixel_size_mm
 
     fit = fit_gaussian(x_mm, row)

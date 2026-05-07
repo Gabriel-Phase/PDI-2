@@ -536,8 +536,10 @@ class MainWindow(QMainWindow):
 
         now = time.monotonic()
         if self._last_frame_time is not None:
-            fps = 1.0 / (now - self._last_frame_time)
-            self.fps_label.setText(f"FPS: {fps:.1f}")
+            elapsed = now - self._last_frame_time
+            if elapsed > 0:
+                fps = 1.0 / elapsed
+                self.fps_label.setText(f"FPS: {fps:.1f}")
         self._last_frame_time = now
 
         max_val = self._camera_thread.max_val if self._camera_thread else 255.0
@@ -582,7 +584,7 @@ class MainWindow(QMainWindow):
         bot_row = min(h, cy + 6)
         
         # Average the rows together to smooth out digital noise
-        row = np.mean(img[top_row:bot_row], axis=0).astype(float)
+        row = np.mean(img[top_row:bot_row], axis=0).astype(float).squeeze()
         
         # ---------------------------------------------------------
         # FIX 2: Beam Clipping Detection
