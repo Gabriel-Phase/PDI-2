@@ -218,9 +218,10 @@ while True:
         show_plot(x_vals, brightness, fit)
 
     # Draw green crosshairs at the centre so the user can see the scan line
-    cv2.line(frame, (0, cy), (w, cy), (0, 255, 0), 2)   # horizontal line
-    cv2.line(frame, (cx, 0), (cx, h), (0, 255, 0), 2)   # vertical line
-
+    cv2.line(frame, (0, cy), (w, cy), (0, 255, 0), 1)   # horizontal line
+    cv2.line(frame, (cx, 0), (cx, h), (0, 255, 0), 1)   # vertical line
+    cv2.line(frame, (cx + 87, 0), (cx + 87, h), (0, 0, 255), 1)    
+    
     # Redraw the button and update its coordinates for this frame
     btn_coords = draw_button(frame)
     cv2.setMouseCallback("Camera", mouse_callback, {'btn': btn_coords})
